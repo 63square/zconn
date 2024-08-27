@@ -4,7 +4,7 @@ const std = @import("std");
 const zconn = @import("zconn");
 
 fn handle_all(req: zconn.Request, res: *zconn.Response) void {
-    std.debug.print("Path: {s}\n", .{req.path.items});
+    std.debug.print("Path: {s}\n", .{req.path});
 
     var iter = req.headers.iterator();
     while (iter.next()) |entry| {

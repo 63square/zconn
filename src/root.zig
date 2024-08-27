@@ -6,14 +6,12 @@ const std = @import("std");
 pub const Request = struct {
     keep_alive: bool,
     method: std.http.Method,
-    path: std.ArrayList(u8),
+    path: []const u8,
     headers: std.StringHashMap([]const u8),
-    body: ?std.ArrayList(u8),
+    body: ?[]const u8,
 
     pub fn deinit(s: *Request) void {
-        s.path.deinit();
         s.headers.deinit();
-        if (s.body) |b| b.deinit();
         s.* = undefined;
     }
 };
@@ -49,10 +47,7 @@ const RequestError = error{
 
 /// parse incoming requests
 /// TODO: make safer
-fn parseRequest(allocator: std.mem.Allocator, conn: std.net.Server.Connection) RequestError!Request {
-    var array_list = std.ArrayList(u8).init(allocator);
-    defer array_list.deinit();
-
+fn parseRequest(array_list: *std.ArrayList(u8), req: *Request, conn: std.net.Server.Connection) RequestError!void {
     // read all, taken from stdlib
     try array_list.ensureTotalCapacity(@min(MAX_REQUEST_SIZE, 4096));
     var start_index: usize = 0;
@@ -83,7 +78,7 @@ fn parseRequest(allocator: std.mem.Allocator, conn: std.net.Server.Connection) R
     while (index < 16) : (index += 1) {
         if (request[index] == ' ') break;
     }
-    const method: std.http.Method = @enumFromInt(std.http.Method.parse(request[0..index]));
+    req.method = @enumFromInt(std.http.Method.parse(request[0..index]));
     index += 1;
 
     if (request[index] != '/') {
@@ -96,8 +91,7 @@ fn parseRequest(allocator: std.mem.Allocator, conn: std.net.Server.Connection) R
         if (request[index] == ' ') break;
     }
 
-    var path = std.ArrayList(u8).init(allocator);
-    try path.appendSlice(request[path_start..index]);
+    req.path = request[path_start..index];
     index += 1;
 
     // verify end, version here
@@ -114,7 +108,6 @@ fn parseRequest(allocator: std.mem.Allocator, conn: std.net.Server.Connection) R
     index += 1;
 
     // parse headers
-    var headers = std.StringHashMap([]const u8).init(allocator);
     var header_start = index;
     while (index < request.len) : (index += 1) {
         if (request[index] != '\n') continue;
@@ -131,11 +124,11 @@ fn parseRequest(allocator: std.mem.Allocator, conn: std.net.Server.Connection) R
         if (header.len < body_start + 2)
             return RequestError.InvalidHeader;
 
+        // TODO: implement keep alive
         const header_name = header[0..body_start];
         body_start += 2;
 
-        const header_body = header[body_start..];
-        try headers.put(header_name, header_body);
+        try req.headers.put(header_name, header[body_start..]);
 
         header_start = index + 1;
     }
@@ -144,19 +137,11 @@ fn parseRequest(allocator: std.mem.Allocator, conn: std.net.Server.Connection) R
         return RequestError.InvalidRequest;
 
     index += 1;
-    var body: ?std.ArrayList(u8) = null;
-    if (method.requestHasBody()) {
-        body = std.ArrayList(u8).init(allocator);
-        try body.?.appendSlice(request[index..]);
+    if (req.method.requestHasBody()) {
+        req.path = request[index..];
+    } else {
+        req.body = null;
     }
-
-    return Request{
-        .keep_alive = false, // TODO: implement keep alive
-        .method = method,
-        .headers = headers,
-        .path = path,
-        .body = body,
-    };
 }
 
 fn writeResponse(allocator: std.mem.Allocator, res: *Response, conn: std.net.Server.Connection) !void {
@@ -189,15 +174,24 @@ pub fn listen(application: Application) !void {
 
         // TODO: improve logging
         const allocator = arena.allocator();
-        const request = parseRequest(allocator, conn);
+        var request = Request{
+            .keep_alive = false,
+            .method = @enumFromInt(0),
+            .path = undefined,
+            .body = undefined,
+            .headers = std.StringHashMap([]const u8).init(allocator),
+        };
 
-        if (request) |req| {
+        var array_list = std.ArrayList(u8).init(allocator);
+        defer array_list.deinit();
+
+        if (parseRequest(&array_list, &request, conn)) {
             var response = Response{
                 .body = std.ArrayList(u8).init(allocator),
                 .headers = std.StringHashMap([]const u8).init(allocator),
             };
 
-            application.handle_all(req, &response);
+            application.handle_all(request, &response);
 
             var buf: [16]u8 = undefined;
             const buf_end = std.fmt.formatIntBuf(&buf, response.body.items.len, 10, .lower, .{});
@@ -205,7 +199,7 @@ pub fn listen(application: Application) !void {
 
             writeResponse(allocator, &response, conn) catch |e| std.debug.print("Response error: {any}\n", .{e});
 
-            if (req.keep_alive == true) continue;
+            if (request.keep_alive == true) continue;
         } else |err| {
             std.debug.print("Request error: {any}\n", .{err});
         }
