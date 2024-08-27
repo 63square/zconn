@@ -30,6 +30,9 @@ pub const Response = struct {
 };
 
 pub const Application = struct {
+    addr: [4]u8,
+    port: u16,
+
     handle_all: fn (Request, *Response) void,
 };
 
@@ -174,7 +177,7 @@ fn writeResponse(allocator: std.mem.Allocator, res: *Response, conn: std.net.Ser
 }
 
 pub fn listen(application: Application) !void {
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 3333);
+    const addr = std.net.Address.initIp4(application.addr, application.port);
 
     var server = try addr.listen(.{});
 
